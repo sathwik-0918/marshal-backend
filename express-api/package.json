@@ -1,0 +1,15 @@
+{
+  "name": "marshal-express-api",
+  "version": "0.1.0",
+  "description": "MARSHAL main backend — auth, schedules, CRUD, and the approval loop.",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "dev": "echo \"Phase 2 will replace this with: nodemon server.js\" && exit 0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}

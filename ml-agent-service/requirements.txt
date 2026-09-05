@@ -1,0 +1,4 @@
+# Phase 1: just enough to read the .env file.
+# fastapi, uvicorn, scikit-learn, langgraph, joblib, pandas arrive in
+# Phase 6, alongside the code that actually needs them.
+python-dotenv==1.0.1
