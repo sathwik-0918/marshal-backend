@@ -7,9 +7,15 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "dev": "echo \"Phase 2 will replace this with: nodemon server.js\" && exit 0"
+    "dev": "nodemon server.js",
+    "start": "node server.js"
   },
   "dependencies": {
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "mongoose": "^9.9.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
   }
 }
