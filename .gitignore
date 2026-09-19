@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+test-api.http
 
 # --- Node (express-api) ---
 node_modules/
@@ -38,3 +39,5 @@ Thumbs.db
 # --- Logs ---
 *.log
 logs/
+
+schedule_knowledge/

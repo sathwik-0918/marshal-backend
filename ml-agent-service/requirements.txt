@@ -1,4 +1,17 @@
-# Phase 1: just enough to read the .env file.
-# fastapi, uvicorn, scikit-learn, langgraph, joblib, pandas arrive in
-# Phase 6, alongside the code that actually needs them.
-python-dotenv==1.0.1
+python-dotenv>=1.0.1
+fastapi>=0.115
+uvicorn[standard]>=0.34
+pydantic>=2.10
+scikit-learn>=1.5
+pandas>=2.2
+numpy>=2.0
+joblib>=1.4
+langgraph>=1.1
+langchain-groq>=0.2
+langchain-core>=0.3
+langchain-text-splitters>=0.3
+sentence-transformers>=3.0
+faiss-cpu>=1.8
+PyMuPDF>=1.24
+python-multipart>=0.0.9
+langchain-groq>=0.3

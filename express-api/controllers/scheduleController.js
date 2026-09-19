@@ -52,7 +52,11 @@ async function discoverPublicSchedules(req, res, next) {
 }
 
 async function getSchedule(req, res) {
-  res.json({ schedule: serializeSchedule(req.schedule, req.scheduleRole), viewerRole: req.scheduleRole });
+  res.json({
+    schedule: serializeSchedule(req.schedule, req.scheduleRole),
+    viewerRole: req.scheduleRole,
+    viewerId: req.user?._id ?? null, // the frontend's "My Schedule" filter needs this to match against stakeholders
+  });
 }
 
 async function updateSchedule(req, res, next) {
