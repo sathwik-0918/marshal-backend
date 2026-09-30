@@ -2,13 +2,7 @@ const Schedule = require('../models/Schedule');
 const Activity = require('../models/Activity');
 const AuditLog = require('../models/AuditLog');
 const { serializeSchedule } = require('../utils/serialize');
-
-function generateAccessCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let code = '';
-  for (let i = 0; i < 8; i++) code += chars[Math.floor(Math.random() * chars.length)];
-  return code;
-}
+const { generateAccessCode } = require('../services/accessCode');
 
 async function createSchedule(req, res, next) {
   try {

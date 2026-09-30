@@ -1,24 +1,20 @@
 import os
-from datetime import datetime, timedelta
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from agent.state import AgentState
-from schemas import UnderstoodRequest, ProposalSet
+from agent.scope_resolver import resolve_affected_activities
+from agent.time_utils import parse_datetime, local_date, local_now, SCHEDULE_TZ, fmt_local
+from agent import constraints as C
+from agent import planner as P
+from schemas import IntentExtraction, RuleNotes
 from ml import predictor
 from knowledge import store_manager
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Same two-tier split Prism uses: cheap/fast for judgment calls,
-# stronger model reserved for the one node doing real synthesis.
-fast_llm = ChatGroq(api_key=GROQ_API_KEY, model="openai/gpt-oss-120b", temperature=0, max_tokens=1024,reasoning_effort="low")
-main_llm = ChatGroq(
-    api_key=GROQ_API_KEY,
-    model="openai/gpt-oss-120b",
-    temperature=0.1,
-    max_tokens=2048,
-    reasoning_effort="medium"
-)
+# One model, two jobs: read the request, and (optionally) annotate finished options with rule notes.
+# It never writes a time or a venue.
+fast_llm = ChatGroq(api_key=GROQ_API_KEY, model="openai/gpt-oss-120b", temperature=0, max_tokens=1536, reasoning_effort="low")
 
 
 def _emit(state: AgentState, node: str, status: str, detail: str, data=None):
@@ -31,43 +27,98 @@ def _emit(state: AgentState, node: str, status: str, detail: str, data=None):
         print(f"[TRACE EMIT ERROR] {error}")
 
 
-# ── understand_request ────────────────────────────────────────────
+def _clarify(question: str) -> dict:
+    return {"proposal": {"needs_clarification": True, "clarification_question": question,
+                         "risk_tier": "low", "options": []}}
+
+
+def _dates_context(activities: list) -> str:
+    dates = set()
+    for a in activities:
+        try:
+            dates.add(local_date(parse_datetime(a["scheduledStart"])))
+        except (ValueError, KeyError, TypeError):
+            continue
+    return "\n".join(f"Day {i + 1} = {d.isoformat()} ({d.strftime('%A')})" for i, d in enumerate(sorted(dates)))
+
+
+def _type_vocabulary(activities: list) -> list:
+    return sorted({(a.get("activityType") or "").strip().lower() for a in activities if (a.get("activityType") or "").strip()})
+
+
+_INTENT_GUIDE = """You are extracting the user's INTENT as structured fields. You know nothing about any activity's venue, people or exact time, and must not guess them - only transcribe what the message states.
+
+Fields:
+- named_activities: exact activity titles the message states.
+- mentioned_venues / mentioned_resources: venue names and person or resource names the message states, exactly as written.
+- activity_type_keywords: ONLY when the message uses a generic category word (games, matches, classes, lectures, meals) and names no specific activity, venue or person. Map it to the matching types from the list above. Otherwise leave empty.
+- time_window_start / time_window_end: the affected period as LOCAL wall-clock ISO 8601 with NO timezone letter or offset, for example 2026-10-05T08:30:00. "Day N" means the Nth date listed above. Relative words (tomorrow, Monday) are relative to today. When no hours are given use: morning 06:00-12:00, afternoon 12:00-17:00, evening 17:00-21:00, whole day 00:00-23:59. Leave both null if the message gives no time scope.
+- operation: exactly one of
+    delay       (running late or pushed later by N minutes)
+    advance     (brought earlier by N minutes)
+    unavailable (a venue or person cannot be used during the window)
+    move_venue  (move to a named venue)
+    move_time   (move to a stated start time)
+    cancel
+    replan      (asks generally to replan, reschedule or find alternatives)
+    unclear     (only if you truly cannot tell)
+- shift_minutes: minutes, for delay or advance only.
+- target_venue: for move_venue, the destination venue.
+- target_time_of_day: HH:MM in 24-hour time, for move_time. target_date: YYYY-MM-DD, only if the message names a date for the new start.
+- needs_knowledge: true only if answering needs uploaded documents such as rules or policies.
+
+Examples:
+"Ground 3 is unavailable from 8:30 to 11:30 on October 5" -> operation unavailable, mentioned_venues Ground 3, window 2026-10-05T08:30:00 to 2026-10-05T11:30:00.
+"Professor Ravi is out Monday morning" -> operation unavailable, mentioned_resources Professor Ravi, window = that Monday 06:00 to 12:00.
+"Day 1 morning games are delayed 45 minutes" -> operation delay, shift_minutes 45, activity_type_keywords = the game types from the list, window = Day 1 06:00 to 12:00.
+"Day 1 Evening Final is running 20 minutes late" -> operation delay, shift_minutes 20, named_activities Day 1 Evening Final, everything else empty.
+"Move Volleyball Match A to Ground 2" -> operation move_venue, named_activities Volleyball Match A, target_venue Ground 2.
+"""
+
 
 def understand_request(state: AgentState) -> dict:
     _emit(state, "understand_request", "active", "Reading the request")
-    structured_llm = fast_llm.with_structured_output(UnderstoodRequest, method="json_schema", strict=False)
-
-    activity_list = "\n".join(
-        f"- id={a['_id']}: {a['title']} at {a['venue']}, starts {a['scheduledStart']}, {a['durationMinutes']} min"
-        for a in state["activities"]
-    )
+    today = local_now()
     prompt = (
-        f"A message came in about the schedule '{state['schedule_name']}'.\n\n"
-        f"Activities on this schedule:\n{activity_list}\n\n"
-        f"Message: \"{state['raw_message']}\"\n\n"
-        "Identify which activity (by id) this is about, if any, and what kind of issue is "
-        "being reported. Also decide whether answering this properly requires checking "
-        "uploaded schedule documents (policies, rules, venue requirements) rather than just "
-        "the schedule and predictions alone."
+        f"Today is {today.strftime('%A')} {today.date().isoformat()}.\n"
+        f"This schedule's dates, in order:\n{_dates_context(state['activities'])}\n"
+        f"Activity types used on this schedule: {', '.join(_type_vocabulary(state['activities'])) or '(none recorded)'}\n\n"
+        + _INTENT_GUIDE
+        + f"\nMessage: \"{state['raw_message']}\""
     )
-    result: UnderstoodRequest = structured_llm.invoke(prompt)
-    relevant_activity = next((a for a in state["activities"] if a["_id"] == result.activity_id), None)
+    failed = False
+    try:
+        structured_llm = fast_llm.with_structured_output(IntentExtraction, method="json_schema", strict=False)
+        result = structured_llm.invoke(prompt)
+    except Exception as error:
+        print(f"[understand_request] extraction failed: {error}")
+        result = IntentExtraction()
+        failed = True
 
-    _emit(state, "understand_request", "done", "Request understood", {"needsKnowledge": result.needs_knowledge})
-    return {"understood": result.model_dump(), "relevant_activity": relevant_activity}
+    affected_ids = resolve_affected_activities(state["activities"], result)
+    relevant = [a for a in state["activities"] if a["_id"] in affected_ids]
 
+    print(f"[understand_request] op={result.operation} shift={result.shift_minutes} named={result.named_activities} "
+          f"venues={result.mentioned_venues} resources={result.mentioned_resources} "
+          f"types={result.activity_type_keywords} window={result.time_window_start} to {result.time_window_end}")
+    print(f"[understand_request] resolved to {len(affected_ids)} activities: {affected_ids}")
 
-# ── retrieve / grade / rewrite — adapted from Prism, same loop shape ─
+    understood = result.model_dump()
+    understood["affected_activity_ids"] = affected_ids
+    understood["extraction_failed"] = failed
+
+    _emit(state, "understand_request", "done", "Request understood",
+          {"affectedCount": len(relevant), "needsKnowledge": result.needs_knowledge})
+    return {"understood": understood, "relevant_activities": relevant}
+
 
 def retrieve(state: AgentState) -> dict:
     _emit(state, "retrieve", "active", "Searching this schedule's documents")
     query = state.get("rewritten_query") or state["raw_message"]
-
     store = store_manager.get_store(state["schedule_id"])
     if store.index is None or store.index.ntotal == 0:
         _emit(state, "retrieve", "done", "No documents uploaded for this schedule yet")
         return {"documents": [], "sources": []}
-
     results = store.query(query_text=query, top_k=5)
     documents, sources = [], []
     for r in results:
@@ -78,7 +129,6 @@ def retrieve(state: AgentState) -> dict:
             documents.append(text)
             if source not in sources:
                 sources.append(source)
-
     _emit(state, "retrieve", "done", f"Found {len(documents)} relevant sections", {"sources": sources})
     return {"documents": documents, "sources": sources}
 
@@ -87,23 +137,20 @@ def grade(state: AgentState) -> dict:
     documents = state["documents"]
     generation_count = state["generation_count"]
     _emit(state, "grade", "active", "Checking whether this evidence is relevant")
-
     if not documents:
         _emit(state, "grade", "done", "No evidence found", {"passed": False})
         return {"grade_passed": False, "generation_count": generation_count + 1}
-
     context_preview = "\n\n".join(documents[:5])[:2000]
     system_prompt = (
-        "You are a relevance grader for event/schedule organizer documents (policies, venue "
-        "rules, activity requirements). Decide whether the provided documents contain enough "
-        "information to answer the request. Reply with exactly one word: yes or no."
+        "You are a relevance grader for event/schedule organizer documents. Decide whether the "
+        "provided documents contain enough information to answer the request. Reply with exactly "
+        "one word: yes or no."
     )
     response = fast_llm.invoke([
         SystemMessage(content=system_prompt),
         HumanMessage(content=f"Request: {state['raw_message'][:200]}\n\nDocs:\n{context_preview}"),
     ])
     passed = "yes" in response.content.strip().lower()
-
     _emit(state, "grade", "done", "Evidence checked", {"passed": passed})
     return {"grade_passed": passed, "generation_count": generation_count if passed else generation_count + 1}
 
@@ -111,8 +158,8 @@ def grade(state: AgentState) -> dict:
 def rewrite(state: AgentState) -> dict:
     _emit(state, "rewrite", "active", "Refining the search")
     system_prompt = (
-        "Rewrite this request to be a more specific search query for event schedule "
-        "documents — policies, venue rules, activity requirements. Return ONLY the rewritten query."
+        "Rewrite this request to be a more specific search query for event schedule documents - "
+        "policies, venue rules, activity requirements. Return ONLY the rewritten query."
     )
     response = fast_llm.invoke([
         SystemMessage(content=system_prompt),
@@ -123,113 +170,151 @@ def rewrite(state: AgentState) -> dict:
     return {"rewritten_query": rewritten}
 
 
-# ── get_ml_prediction — unchanged from before ─────────────────────
-
 def get_ml_prediction(state: AgentState) -> dict:
-    activity = state.get("relevant_activity")
-    if not activity:
-        return {"ml_prediction": None}
+    predictions = {}
+    for activity in state.get("relevant_activities") or []:
+        try:
+            local = parse_datetime(activity["scheduledStart"]).astimezone(SCHEDULE_TZ)
+            predictions[activity["_id"]] = predictor.predict(
+                activity_type=activity.get("activityType") or "session",
+                venue=activity["venue"],
+                scheduled_duration=activity["durationMinutes"],
+                num_people=len(activity.get("stakeholders", [])) or 10,
+                time_of_day=local.hour,
+                stakeholder_past_delay_rate=0.3,
+                day_of_event=1,
+                is_weekend=1 if local.weekday() >= 5 else 0,
+            )
+        except Exception as error:
+            print(f"[get_ml_prediction] skipped {activity.get('title')}: {error}")
+    return {"ml_predictions": predictions}
 
-    start = datetime.fromisoformat(activity["scheduledStart"].replace("Z", "+00:00"))
-    prediction = predictor.predict(
-        activity_type=activity.get("activityType") or "session",
-        venue=activity["venue"],
-        scheduled_duration=activity["durationMinutes"],
-        num_people=len(activity.get("stakeholders", [])) or 10,
-        time_of_day=start.hour,
-        stakeholder_past_delay_rate=0.3,
-        day_of_event=1,
-        is_weekend=1 if start.weekday() >= 5 else 0,
+
+def plan_changes(state: AgentState) -> dict:
+    _emit(state, "plan_changes", "active", "Working out valid options")
+    understood = state.get("understood") or {}
+    if understood.get("extraction_failed"):
+        return _clarify("I had trouble reading that request. Please try rephrasing it, or send it again.")
+
+    items = C.build_items(state["activities"])
+    affected = [
+        items[a["_id"]] for a in (state.get("relevant_activities") or [])
+        if a["_id"] in items and items[a["_id"]].status not in ("cancelled", "completed")
+    ]
+    if not affected:
+        return _clarify(P.no_match_question(understood, items))
+
+    # A match found ONLY through a generic type word, with nothing else
+    # narrowing it down, covering a large slice of the schedule - that's
+    # what "the first three volleyball matches" (matched all 7, all 3
+    # days) and "the match" (matched 20 activities) both looked like.
+    # Neither had a name, venue, resource, or time window pinning it down.
+    scoped_precisely = bool(
+        understood.get("named_activities") or understood.get("mentioned_venues") or understood.get("mentioned_resources")
     )
-    return {"ml_prediction": prediction}
-
-
-# ── generate_proposal — extended to optionally consume RAG context ─
-
-def generate_proposal(state: AgentState) -> dict:
-    if not state.get("relevant_activity"):
-        return {"proposal": ProposalSet(
-            needs_clarification=True,
-            clarification_question="Which activity is this about? I couldn't match your message to one on this schedule.",
-            risk_tier="low", options=[],
-        ).model_dump()}
-
-    _emit(state, "generate_proposal", "active", "Working out possible solutions")
-    understood = state["understood"]
-    activity = state["relevant_activity"]
-    ml = state.get("ml_prediction") or {}
-    documents = state.get("documents") or []
-    sources = state.get("sources") or []
-
-    knowledge_section = ""
-    if documents:
-        knowledge_section = (
-            "\n\nRelevant organizer knowledge (from uploaded documents, sources: "
-            + ", ".join(sources) + "):\n" + "\n\n".join(documents[:3])[:1500]
+    scoped_by_window = bool(understood.get("time_window_start") and understood.get("time_window_end"))
+    if not scoped_precisely and not scoped_by_window and len(affected) > min(5, max(3, len(items) // 4)):
+        names = ", ".join(a.title for a in affected[:5])
+        more = f", and {len(affected) - 5} more" if len(affected) > 5 else ""
+        return _clarify(
+            f"That matched {len(affected)} activities ({names}{more}) - wider than I'd act on without checking. "
+            f"Can you narrow it to a specific day, time, or name a few of them directly?"
         )
 
-    structured_llm = main_llm.with_structured_output(ProposalSet, method="json_schema", strict=False)
-    prompt = (
-        f"Activity affected: {activity['title']} at {activity['venue']}, "
-        f"currently starting {activity['scheduledStart']}, {activity['durationMinutes']} minutes.\n"
-        f"Reported issue: {understood['summary']} (type: {understood['issue_type']}"
-        + (f", ~{understood['minutes_mentioned']} minutes mentioned" if understood.get('minutes_mentioned') else "")
-        + ")\nML prediction: " + f"{ml.get('predicted_duration_minutes', 'unknown')} min duration, "
-        f"{ml.get('delay_probability', 'unknown')} delay probability."
-        + knowledge_section
-        + "\n\nOther activities on this schedule:\n"
-        + "\n".join(f"- {a['title']} at {a['venue']}, {a['scheduledStart']}"
-                     for a in state["activities"] if a["_id"] != activity["_id"])
-        + "\n\nPropose 1 to 3 concrete solutions, respecting any organizer knowledge above if present. "
-        "A solution must never put two activities in the same venue at overlapping times. "
-        "risk_tier: low if same venue and under 15 minutes shifted, high if it creates or "
-        "resolves a conflict with another activity, medium otherwise."
-    )
-    result: ProposalSet = structured_llm.invoke(prompt)
-    _emit(state, "generate_proposal", "done", "Proposal ready")
-    return {"proposal": result.model_dump()}
+    intent = P.intent_from_understood(understood, items)
+    question = P.missing_info(intent, affected)
+    if question:
+        return _clarify(question)
 
+    options, unplaced = P.plan_options(intent, items, affected)
+    if not options:
+        return _clarify(P.failure_message(unplaced, items))
 
-# ── validate_proposal — NEW, deterministic, no LLM ────────────────
+    _emit(state, "plan_changes", "done", f"{len(options)} option(s) ready")
+    return {"proposal": {"needs_clarification": False, "clarification_question": None,
+                         "risk_tier": "medium", "options": options}}
+
 
 def validate_proposal(state: AgentState) -> dict:
-    """
-    Re-checks each proposed option against the REAL activity list using
-    plain datetime comparison — not trusting the LLM's own claim that a
-    given option is conflict-free. If every option turns out to
-    genuinely conflict, the risk tier is escalated regardless of what
-    generate_proposal said, so a bad suggestion can't quietly present
-    itself as low-risk.
-    """
-    proposal = state["proposal"]
+    """Independently re-checks every option from its final changes alone, using the shared constraint code."""
+    proposal = state.get("proposal") or {}
     if proposal.get("needs_clarification"):
         return {"proposal": {**proposal, "validated": True}}
 
-    activity = state.get("relevant_activity")
-    activities = state["activities"]
-    validated_options = []
+    items = C.build_items(state["activities"])
+    affected_ids = {a["_id"] for a in (state.get("relevant_activities") or [])}
+    affected = [items[i] for i in affected_ids if i in items]
+    intent = P.intent_from_understood(state.get("understood") or {}, items)
+    blocked = P.build_blocked(intent, affected)
+    ml = state.get("ml_predictions") or {}
 
-    for option in proposal.get("options", []):
-        conflict = False
-        if activity and option.get("new_venue") and option.get("new_start_time"):
-            try:
-                new_start = datetime.fromisoformat(option["new_start_time"].replace("Z", "+00:00"))
-                new_end = new_start + timedelta(minutes=activity["durationMinutes"])
-                for other in activities:
-                    if other["_id"] == activity["_id"] or other["venue"] != option["new_venue"]:
-                        continue
-                    other_start = datetime.fromisoformat(other["scheduledStart"].replace("Z", "+00:00"))
-                    other_end = other_start + timedelta(minutes=other["durationMinutes"])
-                    if new_start < other_end and other_start < new_end:
-                        conflict = True
-                        break
-            except (ValueError, KeyError):
-                pass  # malformed option data — leave conflict as False, don't crash the graph over it
-        validated_options.append({**option, "conflict_detected": conflict})
+    checked = []
+    for opt in proposal.get("options", []):
+        scoped = [c for c in opt["changes"] if c["activity_id"] in affected_ids]
+        removed = len(opt["changes"]) - len(scoped)
+        ev = C.evaluate_option(scoped, items, blocked)
+        warnings, notes = C.describe_evaluation(ev, items)
+        ml_notes = C.ml_overrun_notes(ev, items, ml)
+        notes.extend(ml_notes)
+        if removed:
+            notes.append(f"{removed} change(s) outside the affected activities were discarded")
+        conflict_ids = sorted({i for pair in ev["new_pairs"] for i in pair})
+        checked.append({
+            **opt,
+            "changes": scoped,
+            "risk": C.risk_level(warnings, ev, bool(ml_notes)),
+            "checks": {"warnings": warnings, "notes": notes, "conflict_activity_ids": conflict_ids},
+        })
 
-    all_conflict = bool(validated_options) and all(o["conflict_detected"] for o in validated_options)
-    risk_tier = "high" if all_conflict else proposal["risk_tier"]
+    checked.sort(key=lambda o: len(o["checks"]["warnings"]) > 0)  # stable: clean options first
+    risk = checked[0]["risk"] if checked else "low"
+    _emit(state, "validate_proposal", "done", "Checked against the real schedule")
+    return {"proposal": {**proposal, "options": checked, "risk_tier": risk, "validated": True}, "validated": True}
 
-    _emit(state, "validate_proposal", "done", "Checked against the real schedule",
-          {"anyConflict": any(o["conflict_detected"] for o in validated_options)})
-    return {"proposal": {**proposal, "options": validated_options, "risk_tier": risk_tier, "validated": True}}
+
+def _pretty_change(c: dict, items: dict) -> str:
+    it = items.get(c["activity_id"])
+    title = it.title if it else "Activity"
+    if c["field"] == "scheduledStart":
+        try:
+            return f"{title}: start -> {fmt_local(parse_datetime(c['new_value']))}"
+        except ValueError:
+            return f"{title}: start changes"
+    return f"{title}: {c['field']} -> {c['new_value']}"
+
+
+def annotate_rules(state: AgentState) -> dict:
+    """Advisory only: attaches notes from retrieved documents. Never alters a change, fails soft."""
+    proposal = state.get("proposal") or {}
+    documents = state.get("documents") or []
+    if proposal.get("needs_clarification") or not documents or not proposal.get("options"):
+        return {}
+
+    items = C.build_items(state["activities"])
+    option_lines = "\n".join(
+        f"Option {i}: {opt['description']} ({'; '.join(_pretty_change(c, items) for c in opt['changes'][:6])})"
+        for i, opt in enumerate(proposal["options"], start=1)
+    )
+    prompt = (
+        "Excerpts from this schedule's organizer documents:\n"
+        + "\n---\n".join(documents[:3])[:1800]
+        + "\n\nProposed options (already verified conflict-free by software):\n" + option_lines
+        + "\n\nFor each option, add a short note ONLY if an excerpt directly applies - a rule the option may "
+        "break, or a requirement it satisfies. Quote the rule briefly. Do not invent rules. "
+        "Return an empty list if no excerpt is relevant."
+    )
+    try:
+        result = fast_llm.with_structured_output(RuleNotes, method="json_schema", strict=False).invoke(prompt)
+    except Exception as error:
+        print(f"[annotate_rules] skipped: {error}")
+        return {}
+
+    sources = state.get("sources") or []
+    label = ", ".join(sources) if sources else "uploaded documents"
+    options = [dict(o) for o in proposal["options"]]
+    for n in result.notes:
+        if 1 <= n.option_index <= len(options):
+            checks = dict(options[n.option_index - 1].get("checks") or {})
+            checks["notes"] = list(checks.get("notes", [])) + [f"Rule check ({label}): {n.note}"]
+            options[n.option_index - 1]["checks"] = checks
+    return {"proposal": {**proposal, "options": options, "sources": sources}}

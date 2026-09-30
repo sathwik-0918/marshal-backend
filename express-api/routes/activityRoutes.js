@@ -12,4 +12,6 @@ router.post('/', requireAuthentication, requireRole('manager'), activityControll
 router.patch('/:activityId', requireAuthentication, requireRole('manager'), activityController.updateActivity);
 router.delete('/:activityId', requireAuthentication, requireRole('manager'), activityController.deleteActivity);
 
+router.patch('/:activityId/stakeholders', requireAuthentication, requireRole('manager'), activityController.updateStakeholders);
+
 module.exports = router;

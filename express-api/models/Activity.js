@@ -54,6 +54,10 @@ const activitySchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    requiredResources: {
+      type: [String],
+      default: [],
+    },
     status: {
       type: String,
       enum: ['scheduled', 'in_progress', 'delayed', 'completed', 'cancelled'],

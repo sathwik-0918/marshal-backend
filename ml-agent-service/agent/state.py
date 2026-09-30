@@ -8,7 +8,7 @@ class AgentState(TypedDict):
     raw_message: str
 
     understood: Optional[dict]
-    relevant_activity: Optional[dict]
+    relevant_activities: list  # was relevant_activity (singular)
 
     rewritten_query: Optional[str]
     documents: list
@@ -16,7 +16,7 @@ class AgentState(TypedDict):
     generation_count: int
     grade_passed: bool
 
-    ml_prediction: Optional[dict]
+    ml_predictions: dict  # was ml_prediction (singular) — now keyed by activity_id
 
     proposal: Optional[dict]
     validated: bool

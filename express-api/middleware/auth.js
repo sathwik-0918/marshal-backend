@@ -6,6 +6,8 @@ const User = require('../models/User');
 // routes must keep working for anonymous visitors.
 const clerkAuth = clerkMiddleware();
 
+const { resolvePendingInvitesForUser } = require('../services/pendingInvites');
+
 // Shared by both auth paths below, so "create a local User from a
 // Clerk profile" exists in exactly one place, not two copies that
 // can drift apart.
@@ -14,12 +16,17 @@ async function findOrCreateUser(clerkUserId) {
   if (user) return user;
 
   const clerkUser = await clerkClient.users.getUser(clerkUserId);
-  return User.create({
+  user = await User.create({
     clerkId: clerkUserId,
     name: `${clerkUser.firstName ?? ''} ${clerkUser.lastName ?? ''}`.trim() || 'Unnamed',
     email: clerkUser.emailAddresses[0]?.emailAddress ?? '',
     avatarUrl: clerkUser.imageUrl,
   });
+
+  // Brand new account — resolve anything they were invited to before
+  // this account even existed.
+  await resolvePendingInvitesForUser(user);
+  return user;
 }
 
 // Blocks with a clean 401 JSON response if there's no valid session.

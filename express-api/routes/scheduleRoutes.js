@@ -4,6 +4,7 @@ const router = express.Router();
 const { requireAuthentication, attachUserIfPresent } = require('../middleware/auth');
 const { loadSchedule, requireReadAccess, requireRole } = require('../middleware/scheduleAccess');
 const scheduleController = require('../controllers/scheduleController');
+const scheduleFromFileController = require('../controllers/scheduleFromFileController');
 const activityRoutes = require('./activityRoutes');
 
 const agentController = require('../controllers/agentController');
@@ -14,6 +15,9 @@ const knowledgeController = require('../controllers/knowledgeController');
 
 const proposalController = require('../controllers/proposalController');
 
+const memberController = require('../controllers/memberController');
+const bulkImportController = require('../controllers/bulkImportController');
+
 // IMPORTANT ORDER: these two have no :scheduleId and MUST be
 // registered before the router.use('/:scheduleId', ...) below it —
 // otherwise Express would match "discover" and "mine" AS IF they
@@ -22,6 +26,8 @@ const proposalController = require('../controllers/proposalController');
 router.get('/discover', scheduleController.discoverPublicSchedules);
 router.get('/mine', requireAuthentication, scheduleController.listMySchedules);
 router.post('/', requireAuthentication, scheduleController.createSchedule);
+router.post('/from-file/preview', requireAuthentication, upload.single('file'), scheduleFromFileController.previewFromFile);
+router.post('/from-file/confirm', requireAuthentication, scheduleFromFileController.confirmFromFile);
 
 router.use('/:scheduleId', loadSchedule);
 
@@ -36,5 +42,13 @@ router.patch('/:scheduleId/proposals/:proposalId/decide', requireAuthentication,
 // Nested activities inherit req.schedule from loadSchedule above —
 // no second database lookup needed.
 router.use('/:scheduleId/activities', activityRoutes);
+
+router.get('/:scheduleId/members', requireAuthentication, requireRole('viewer'), memberController.listMembers);
+router.post('/:scheduleId/members', requireAuthentication, requireRole('manager'), memberController.addMember);
+router.post('/:scheduleId/activities/bulk-import/preview', requireAuthentication, requireRole('manager'), upload.single('file'), bulkImportController.previewImport);
+router.post('/:scheduleId/activities/bulk-import/confirm', requireAuthentication, requireRole('manager'), bulkImportController.confirmImport);
+
+router.patch('/:scheduleId/members/:userId', requireAuthentication, requireRole('manager'), memberController.changeMemberRole);
+router.delete('/:scheduleId/members/:userId', requireAuthentication, memberController.removeMember);
 
 module.exports = router;

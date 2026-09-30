@@ -9,7 +9,10 @@ class ActivityContext(BaseModel):
     scheduledStart: str
     durationMinutes: int
     activityType: Optional[str] = "session"
+    status: Optional[str] = "scheduled"
     stakeholders: list = []
+    requiredResources: list[str] = []
+    dependencies: list[str] = []
 
     class Config:
         populate_by_name = True
@@ -22,29 +25,33 @@ class AgentRequest(BaseModel):
     activities: list[ActivityContext]
 
 
-class UnderstoodRequest(BaseModel):
-    """Structured output schema for the understanding node."""
-    activity_id: Optional[str] = Field(None, description="The _id of the activity this message is about, exactly as given in the activity list. Null if none can be determined.")
-    issue_type: str = Field(description="One of: delay, cancellation, venue_conflict, reschedule_request, other")
-    summary: str = Field(description="One-sentence plain-English summary of what's being reported")
-    minutes_mentioned: Optional[int] = Field(None, description="Any specific delay/duration in minutes mentioned in the message")
-    needs_knowledge: bool = Field(description="True if answering this properly requires checking uploaded schedule documents, policies, or venue rules — not just the live schedule and ML predictions")
+class IntentExtraction(BaseModel):
+    named_activities: list[str] = Field(default_factory=list, description="Exact activity titles the message states")
+    mentioned_venues: list[str] = Field(default_factory=list, description="Venue names the message itself states")
+    mentioned_resources: list[str] = Field(default_factory=list, description="Person or resource names the message itself states")
+    activity_type_keywords: list[str] = Field(default_factory=list, description="Types mapped from a generic category word like 'games' or 'classes'")
+    time_window_start: Optional[str] = Field(None, description="LOCAL ISO 8601, no timezone letter or offset")
+    time_window_end: Optional[str] = Field(None, description="LOCAL ISO 8601, no timezone letter or offset")
+    operation: str = Field("unclear", description="delay | advance | unavailable | move_venue | move_time | cancel | replan | unclear")
+    shift_minutes: Optional[int] = Field(None, description="Minutes, for delay or advance only")
+    target_venue: Optional[str] = None
+    target_time_of_day: Optional[str] = Field(None, description="HH:MM 24-hour")
+    target_date: Optional[str] = Field(None, description="YYYY-MM-DD, only if the message names a date")
+    summary: str = ""
+    needs_knowledge: bool = False
 
 
-class ProposalOption(BaseModel):
-    description: str = Field(description="Plain-English description of this proposed change")
-    new_venue: Optional[str] = None
-    new_start_time: Optional[str] = Field(None, description="ISO 8601 datetime if this option changes the start time")
+class RuleNote(BaseModel):
+    option_index: int
+    note: str
 
 
-class ProposalSet(BaseModel):
-    """Structured output schema for the proposal-generation node."""
-    needs_clarification: bool
-    clarification_question: Optional[str] = None
-    risk_tier: str = Field(description="low, medium, or high")
-    options: list[ProposalOption] = Field(default_factory=list)
+class RuleNotes(BaseModel):
+    notes: list[RuleNote] = Field(default_factory=list)
 
 
 class AgentResponse(BaseModel):
-    understood: UnderstoodRequest
-    proposal: ProposalSet
+    # Deliberately plain dicts. A typed response model silently deletes every key it doesn't declare.
+    # That is exactly how the validation warnings were being erased before they reached the UI.
+    understood: dict
+    proposal: dict

@@ -61,4 +61,4 @@ function requireRole(minRole) {
   };
 }
 
-module.exports = { loadSchedule, requireReadAccess, requireRole };
+module.exports = { loadSchedule, requireReadAccess, requireRole, ROLE_RANK };
