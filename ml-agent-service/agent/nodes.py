@@ -6,9 +6,10 @@ from agent.scope_resolver import resolve_affected_activities
 from agent.time_utils import parse_datetime, local_date, local_now, SCHEDULE_TZ, fmt_local
 from agent import constraints as C
 from agent import planner as P
-from schemas import IntentExtraction, RuleNotes
+from schemas import IntentExtraction, IntentRoute, QuerySpec, RuleNotes
 from ml import predictor
 from knowledge import store_manager
+from agent import query_engine
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
@@ -75,6 +76,140 @@ Examples:
 "Move Volleyball Match A to Ground 2" -> operation move_venue, named_activities Volleyball Match A, target_venue Ground 2.
 """
 
+_QUERY_GUIDE = """Convert this question about a schedule into a structured query.
+
+query_type - exactly one of:
+    count               how many activities match
+    list                show/list the matching activities
+    lookup_time         what time/when is a specific activity
+    lookup_venue        what venue is X at, OR what's happening at a given venue
+    lookup_participants who is involved in a specific activity
+    lookup_resources    what resources/people a specific activity requires
+    exists              is a specific activity on the schedule
+    total_duration      sum of durations for the matching activities
+    summary             general \"tell me about X\" for one specific activity
+    unsupported         not answerable from structured schedule data alone
+
+activity_name: a specific activity title or a fragment of one, ONLY if one is actually named
+day_number: the N in \"Day N\", if referenced.
+weekday: the day of week (Monday, Tuesday, etc.) if referenced directly - e.g. \"what's for dinner Wednesday\", \"what's on Monday\". Different from day_number, which means \"Day N\" of a multi-day event.
+venue: a specific venue, ONLY if the message names one directly (not inferred from an activity).
+activity_type_keywords: if the message uses a category word (games, matches, classes, lectures, meals) rather than naming one specific activity, map it to every matching type from this schedule's actual types: {types}. Leave empty if a specific activity was already named instead.
+"""
+
+def route_intent(state: AgentState) -> dict:
+    _emit(state, "route_intent", "active", "Reading your message")
+    msg = state["raw_message"].strip()
+
+    # Cheap, deterministic pre-filter for the most obvious cases - saves
+    # a full LLM round-trip for "hi" and skips straight past any risk of
+    # a short greeting being misread as a scheduling question.
+    if len(msg.split()) <= 3 and msg.lower().rstrip("!.") in (
+        "hi", "hello", "hey", "hi marshal", "hello marshal", "thanks", "thank you", "ok", "okay"
+    ):
+        return {"intent": "general_chat"}
+
+    try:
+        structured_llm = fast_llm.with_structured_output(IntentRoute, method="json_schema", strict=False)
+        prompt = (
+            "Classify this message about a schedule into exactly one category:\n"
+            "- general_chat: greetings, thanks, or asking what MARSHAL can do - no schedule data needed\n"
+            "- schedule_query: asking ABOUT existing schedule facts - counts, times, venues, participants, "
+            "'what's on Day N', 'is X scheduled', 'show all activities'. Answerable from structured data alone.\n"
+            "- knowledge_query: asking about RULES, POLICIES, or anything from an uploaded document - "
+            "'what are the rules', 'what does the document say about X', restrictions, requirements.\n"
+            "- schedule_action: reporting a disruption or asking for something to be CHANGED - a delay, "
+            "unavailability, a move, a cancellation. Anything that implies the schedule itself should change.\n\n"
+            f"Message: \"{msg}\""
+        )
+        result = structured_llm.invoke(prompt)
+        intent = result.intent if result.intent in ("general_chat", "schedule_query", "knowledge_query", "schedule_action") else "schedule_action"
+    except Exception as error:
+        print(f"[route_intent] failed, defaulting to schedule_action: {error}")
+        intent = "schedule_action"  # the safest default is the path with the most existing guardrails, not the most permissive one
+
+    _emit(state, "route_intent", "done", f"Routed as {intent}")
+    return {"intent": intent}
+
+
+def answer_general_chat(state: AgentState) -> dict:
+    response = fast_llm.invoke([
+        SystemMessage(content="You are MARSHAL, a schedule management assistant. Reply briefly and warmly - "
+                               "a sentence or two. If asked what you can do, mention you can answer questions "
+                               "about this schedule, look up rules from uploaded documents, or help replan "
+                               "around a delay or conflict."),
+        HumanMessage(content=state["raw_message"]),
+    ])
+    return {"proposal": {"needs_clarification": True, "clarification_question": response.content.strip(),
+                         "risk_tier": "low", "options": [], "is_chat_reply": True}}
+
+
+def answer_schedule_query(state: AgentState) -> dict:
+    _emit(state, "answer_schedule_query", "active", "Checking the schedule")
+    vocabulary = _type_vocabulary(state["activities"])
+    try:
+        structured_llm = fast_llm.with_structured_output(QuerySpec, method="json_schema", strict=False)
+        prompt = _QUERY_GUIDE.format(types=", ".join(vocabulary) or "(none recorded)") + f"\nQuestion: \"{state['raw_message']}\""
+        spec = structured_llm.invoke(prompt)
+    except Exception as error:
+        print(f"[answer_schedule_query] extraction failed: {error}")
+        spec = QuerySpec(query_type="unsupported")
+
+    result = query_engine.execute(spec, state["activities"], state.get("reference_entries", []))
+
+    # Proceeding to the gap flagged last turn: "summary" is the one
+    # query type worth also checking this schedule's documents - "tell
+    # me about X" naturally includes any rule specific to X. Deliberately
+    # NOT the full retrieve/grade/rewrite loop knowledge_query uses -
+    # this is a small, deterministic enrichment on an already-answered
+    # question, not a second independent one. A chunk is only attached
+    # if the activity's own title, venue, or a required resource is a
+    # literal match inside it - no LLM relevance judgment, so nothing
+    # here can misattribute a document to the wrong activity.
+    if spec.query_type == "summary" and len(result.get("matched_ids", [])) == 1:
+        items = C.build_items(state["activities"])
+        activity_item = items.get(result["matched_ids"][0])
+        if activity_item:
+            try:
+                store = store_manager.get_store(state["schedule_id"])
+                if store.index is not None and store.index.ntotal > 0:
+                    hits = store.query(query_text=f"{activity_item.title} {activity_item.venue}", top_k=3)
+                    needles = [activity_item.title.lower(), activity_item.venue.lower()] + [r.lower() for r in activity_item.resources]
+                    for h in hits:
+                        text = (h.get("metadata", {}) or {}).get("text", "")
+                        if any(n and n in text.lower() for n in needles):
+                            result["answer"] += " Related note from this schedule's documents: " + text[:300]
+                            break
+            except Exception as error:
+                print(f"[answer_schedule_query] knowledge enrichment skipped: {error}")
+
+    _emit(state, "answer_schedule_query", "done", "Answered")
+    return {"proposal": {"needs_clarification": True, "clarification_question": result["answer"],
+                         "risk_tier": "low", "options": [], "is_chat_reply": True}}
+
+
+def answer_knowledge_query(state: AgentState) -> dict:
+    """Reuses retrieve/grade exactly as they already exist - the gap
+    ChatGPT correctly identified wasn't that RAG was broken, it's that
+    nothing conversational was ever routed to it."""
+    _emit(state, "answer_knowledge_query", "active", "Checking uploaded documents")
+    documents = state.get("documents") or []
+    sources = state.get("sources") or []
+    if not documents:
+        return {"proposal": {"needs_clarification": True,
+                             "clarification_question": "I didn't find anything in this schedule's uploaded documents that answers that.",
+                             "risk_tier": "low", "options": [], "is_chat_reply": True}}
+
+    response = fast_llm.invoke([
+        SystemMessage(content="Answer the question using ONLY the provided document excerpts. If they don't "
+                               "actually answer it, say so plainly rather than guessing."),
+        HumanMessage(content=f"Question: {state['raw_message']}\n\nDocument excerpts:\n" + "\n---\n".join(documents[:3])[:1800]),
+    ])
+    answer_text = response.content.strip()
+    if sources:
+        answer_text += f" (from: {', '.join(sources)})"
+    return {"proposal": {"needs_clarification": True, "clarification_question": answer_text,
+                         "risk_tier": "low", "options": [], "is_chat_reply": True}}
 
 def understand_request(state: AgentState) -> dict:
     _emit(state, "understand_request", "active", "Reading the request")

@@ -5,7 +5,9 @@ class AgentState(TypedDict):
     schedule_id: str
     schedule_name: str
     activities: list
+    reference_entries: list
     raw_message: str
+    intent: str
 
     understood: Optional[dict]
     relevant_activities: list  # was relevant_activity (singular)

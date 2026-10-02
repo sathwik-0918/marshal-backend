@@ -27,6 +27,7 @@ router.get('/discover', scheduleController.discoverPublicSchedules);
 router.get('/mine', requireAuthentication, scheduleController.listMySchedules);
 router.post('/', requireAuthentication, scheduleController.createSchedule);
 router.post('/from-file/preview', requireAuthentication, upload.single('file'), scheduleFromFileController.previewFromFile);
+router.post('/from-file/preview-document', requireAuthentication, upload.single('file'), scheduleFromFileController.previewFromDocument);
 router.post('/from-file/confirm', requireAuthentication, scheduleFromFileController.confirmFromFile);
 
 router.use('/:scheduleId', loadSchedule);

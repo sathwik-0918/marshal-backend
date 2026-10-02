@@ -9,7 +9,7 @@ function validateRow(row, rowIndex) {
   const errors = [];
   const warnings = [];
 
-  const required = ['title', 'scheduledStart', 'durationMinutes', 'venue'];
+  const required = ['title', 'scheduledStart', 'durationMinutes'];
   const missing = required.filter((f) => !String(row[f] || '').trim());
   if (missing.length > 0) errors.push(`Missing ${missing.join(', ')}`);
 
@@ -24,6 +24,10 @@ function validateRow(row, rowIndex) {
     } else if (duration > 1440) {
       warnings.push('Over 24 hours - double check this is correct');
     }
+  }
+
+  if (!String(row.venue || '').trim()) {
+    warnings.push('No venue given - fine for things like exams or calendar periods with no assigned room, but confirm that\'s actually correct');
   }
 
   return {

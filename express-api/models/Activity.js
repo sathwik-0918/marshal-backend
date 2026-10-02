@@ -52,7 +52,7 @@ const activitySchema = new mongoose.Schema(
 
     venue: {
       type: String,
-      required: true,
+      default: '',
     },
     requiredResources: {
       type: [String],

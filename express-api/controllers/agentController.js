@@ -1,4 +1,5 @@
 const Activity = require('../models/Activity');
+const ReferenceEntry = require('../models/ReferenceEntry');
 const Proposal = require('../models/Proposal');
 const AuditLog = require('../models/AuditLog');
 const Notification = require('../models/Notification');
@@ -9,6 +10,7 @@ async function reportProblem(req, res, next) {
     if (!message) return res.status(400).json({ error: 'message is required' });
 
     const activities = await Activity.find({ scheduleId: req.schedule._id }).sort({ scheduledStart: 1 });
+    const referenceEntries = await ReferenceEntry.find({ scheduleId: req.schedule._id });
 
     const agentRes = await fetch(`${process.env.ML_SERVICE_URL}/agent/process`, {
       method: 'POST',
@@ -29,6 +31,19 @@ async function reportProblem(req, res, next) {
           requiredResources: a.requiredResources,
           dependencies: (a.dependencies || []).map((d) => d.toString()),
         })),
+        reference_entries: referenceEntries.map((r) => ({
+          _id: r._id.toString(),
+          title: r.title,
+          entryType: r.entryType,
+          description: r.description || '',
+          weekday: r.weekday || null,
+          startTime: r.startTime || null,
+          endTime: r.endTime || null,
+          startDate: r.startDate ? r.startDate.toISOString().slice(0, 10) : null,
+          endDate: r.endDate ? r.endDate.toISOString().slice(0, 10) : null,
+          venue: r.venue || '',
+          metadata: r.metadata || [],
+        })),
       }),
     });
 
@@ -36,7 +51,7 @@ async function reportProblem(req, res, next) {
     const { understood, proposal } = await agentRes.json();
 
     if (proposal.needs_clarification) {
-      return res.json({ needsClarification: true, question: proposal.clarification_question });
+      return res.json({ needsClarification: true, question: proposal.clarification_question, isChatReply: Boolean(proposal.is_chat_reply) });
     }
 
     const activityMap = new Map(activities.map((a) => [a._id.toString(), a]));
