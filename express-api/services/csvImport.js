@@ -5,6 +5,59 @@ function parseCSV(buffer) {
   return parse(buffer, { columns: true, skip_empty_lines: true, trim: true });
 }
 
+function stripUndefined(value) {
+  const trimmed = String(value || '').trim();
+  return trimmed === 'UNDEFINED' ? '' : trimmed;
+}
+
+function detectCsvShape(headers) {
+  const h = new Set(headers.map((x) => x.trim()));
+  if (h.has('scheduledStart') && h.has('durationMinutes')) return 'activity';
+  if (h.has('weekday')) return 'recurring';
+  if (h.has('startDate') && h.has('endDate')) return 'daterange';
+  return null;
+}
+
+function parseRecurringRow(row) {
+  return {
+    entry_type: 'recurring_weekly',
+    title: row.title || '',
+    weekday: (row.weekday || '').trim(),
+    start_time: stripUndefined(row.startTime),
+    end_time: stripUndefined(row.endTime),
+    venue: stripUndefined(row.venue),
+    metadata: (row.metadata || '').split(';').map((s) => s.trim()).filter((s) => s && s !== 'UNDEFINED'),
+  };
+}
+
+function parseDateRangeRow(row) {
+  return {
+    entry_type: 'date_range',
+    title: row.title || '',
+    start_date: (row.startDate || '').trim(),
+    end_date: (row.endDate || '').trim(),
+    description: stripUndefined(row.description),
+    metadata: (row.metadata || '').split(';').map((s) => s.trim()).filter((s) => s && s !== 'UNDEFINED'),
+  };
+}
+
+function validateReferenceEntry(entry, rowIndex) {
+  const errors = [];
+  const warnings = [];
+  if (!entry.title?.trim()) errors.push('Missing title');
+  if (entry.entry_type === 'recurring_weekly') {
+    const validDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+    if (!validDays.includes(entry.weekday)) errors.push('Missing or invalid weekday');
+    if (!entry.start_time) warnings.push('No start time - will display as menu-style, no fixed clock time');
+  } else if (entry.entry_type === 'date_range') {
+    if (!entry.start_date || Number.isNaN(new Date(entry.start_date).getTime())) errors.push('Missing or invalid start date');
+    if (!entry.end_date || Number.isNaN(new Date(entry.end_date).getTime())) errors.push('Missing or invalid end date');
+  } else {
+    errors.push('Unrecognized entry type');
+  }
+  return { ...entry, rowIndex, valid: errors.length === 0, errors, warnings };
+}
+
 function validateRow(row, rowIndex) {
   const errors = [];
   const warnings = [];
@@ -13,7 +66,9 @@ function validateRow(row, rowIndex) {
   const missing = required.filter((f) => !String(row[f] || '').trim());
   if (missing.length > 0) errors.push(`Missing ${missing.join(', ')}`);
 
-  if (row.scheduledStart && !missing.includes('scheduledStart')) {
+  if (row.scheduledStart?.trim() === 'UNDEFINED') {
+    errors.push('No time given (marked UNDEFINED) - this needs one to be created as a dated activity');
+  } else if (row.scheduledStart && !missing.includes('scheduledStart')) {
     if (Number.isNaN(new Date(row.scheduledStart).getTime())) errors.push('Invalid date/time format');
   }
 
@@ -33,13 +88,13 @@ function validateRow(row, rowIndex) {
   return {
     rowIndex,
     title: row.title || '',
-    activityType: row.activityType || 'session',
+    activityType: stripUndefined(row.activityType) || 'session',
     scheduledStart: row.scheduledStart || '',
     durationMinutes: row.durationMinutes || '',
-    venue: row.venue || '',
-    description: row.description || '',
-    participantEmails: row.participantEmails || '',
-    requiredResources: row.requiredResources || '',
+    venue: stripUndefined(row.venue),
+    description: stripUndefined(row.description),
+    participantEmails: stripUndefined(row.participantEmails),
+    requiredResources: stripUndefined(row.requiredResources),
     valid: errors.length === 0,
     errors,
     warnings,
@@ -101,4 +156,4 @@ function inferDateRange(rows) {
   };
 }
 
-module.exports = { parseCSV, validateRow, markDuplicates, annotateEmailStatus, inferDateRange };
+module.exports = { parseCSV, validateRow, markDuplicates, annotateEmailStatus, inferDateRange, detectCsvShape, parseRecurringRow, parseDateRangeRow, validateReferenceEntry };

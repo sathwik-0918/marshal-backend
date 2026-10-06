@@ -2,9 +2,15 @@ const Schedule = require('../models/Schedule');
 const Activity = require('../models/Activity');
 const ReferenceEntry = require('../models/ReferenceEntry');
 const AuditLog = require('../models/AuditLog');
-const { parseCSV, validateRow, markDuplicates, annotateEmailStatus, inferDateRange } = require('../services/csvImport');
+const { parseCSV, validateRow, markDuplicates, annotateEmailStatus, inferDateRange, detectCsvShape, parseRecurringRow, parseDateRangeRow, validateReferenceEntry } = require('../services/csvImport');
 const { addPendingInvite } = require('../services/pendingInvites');
 const { generateAccessCode } = require('../services/accessCode');
+
+function parseDateSafe(value) {
+  if (!value) return undefined;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? undefined : d;
+}
 
 async function previewFromFile(req, res, next) {
   try {
@@ -29,7 +35,7 @@ async function previewFromFile(req, res, next) {
 
 async function confirmFromFile(req, res, next) {
   try {
-    const { name, description, category, visibility, startDate, endDate, location, rows, referenceEntries, additionalNotes } = req.body;
+    const { name, description, category, visibility, startDate, endDate, location, rows, referenceEntries, additionalNotes, detectedScheduleType, orgContext } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
     const hasRows = Array.isArray(rows) && rows.length > 0;
     const hasRefs = Array.isArray(referenceEntries) && referenceEntries.length > 0;
@@ -41,6 +47,8 @@ async function confirmFromFile(req, res, next) {
       name, description, category,
       visibility: visibility || 'private',
       startDate, endDate, location,
+      sourceDocumentType: detectedScheduleType || undefined,
+      sourceContext: orgContext || undefined,
       ownerId: req.user._id,
       members: [{ userId: req.user._id, role: 'owner' }],
       accessCode: visibility !== 'public' ? generateAccessCode() : undefined,
@@ -91,8 +99,8 @@ async function confirmFromFile(req, res, next) {
         weekday: entry.weekday || undefined,
         startTime: entry.start_time || undefined,
         endTime: entry.end_time || undefined,
-        startDate: entry.start_date ? new Date(entry.start_date) : undefined,
-        endDate: entry.end_date ? new Date(entry.end_date) : undefined,
+        startDate: parseDateSafe(entry.start_date),
+        endDate: parseDateSafe(entry.end_date),
         venue: entry.venue || '',
         metadata: entry.metadata || [],
       });
@@ -167,28 +175,56 @@ async function previewFromDocument(req, res, next) {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
 
-    const formData = new FormData();
-    formData.append('file', new Blob([req.file.buffer]), req.file.originalname);
+    const filename = (req.file.originalname || '').toLowerCase();
 
-    const mlRes = await fetch(`${process.env.ML_SERVICE_URL}/schedule/extract`, { method: 'POST', body: formData });
-    const data = await mlRes.json();
-    if (!mlRes.ok || !data.success) {
-      return res.status(400).json({ error: data.error || 'Could not extract a schedule from this file' });
+    let rawRows = [];
+    let rawReferenceEntries = [];
+    let detectedScheduleType = '';
+    let additionalNotes = '';
+    let orgContext = {};
+
+    if (filename.endsWith('.csv')) {
+      const parsed = parseCSV(req.file.buffer);
+      const shape = parsed.length > 0 ? detectCsvShape(Object.keys(parsed[0])) : null;
+      if (shape === 'activity') {
+        rawRows = parsed.map((row, i) => validateRow(row, i + 1));
+        detectedScheduleType = 'MARSHAL activity template';
+      } else if (shape === 'recurring') {
+        rawReferenceEntries = parsed.map(parseRecurringRow);
+        detectedScheduleType = 'MARSHAL recurring-weekly template';
+      } else if (shape === 'daterange') {
+        rawReferenceEntries = parsed.map(parseDateRangeRow);
+        detectedScheduleType = 'MARSHAL date-range template';
+      }
     }
 
-    const extraction = data.extraction;
-    const rows = (extraction.activities || []).map((a, i) => extractedRowToCsvRow(a, i + 1));
-    markDuplicates(rows);
-    await annotateEmailStatus(rows, new Set());
-    const suggested = inferDateRange(rows);
+    if (!rawRows.length && !rawReferenceEntries.length) {
+      const formData = new FormData();
+      formData.append('file', new Blob([req.file.buffer]), req.file.originalname);
+      const mlRes = await fetch(`${process.env.ML_SERVICE_URL}/schedule/extract`, { method: 'POST', body: formData });
+      const data = await mlRes.json();
+      if (!mlRes.ok || !data.success) {
+        return res.status(400).json({ error: data.error || 'Could not extract a schedule from this file' });
+      }
+      const extraction = data.extraction;
+      rawRows = (extraction.activities || []).map((a, i) => extractedRowToCsvRow(a, i + 1));
+      rawReferenceEntries = extraction.reference_entries || [];
+      detectedScheduleType = extraction.detected_schedule_type || '';
+      additionalNotes = extraction.additional_notes || '';
+      orgContext = {
+        orgName: extraction.org_name || '',
+        department: extraction.department || '',
+        academicTerm: extraction.academic_term || '',
+        location: extraction.location || '',
+      };
+    }
 
-    res.json({
-      rows,
-      referenceEntries: extraction.reference_entries || [],
-      suggested,
-      detectedScheduleType: extraction.detected_schedule_type || '',
-      additionalNotes: extraction.additional_notes || '',
-    });
+    markDuplicates(rawRows);
+    await annotateEmailStatus(rawRows, new Set());
+    const referenceEntries = rawReferenceEntries.map((e, i) => validateReferenceEntry(e, i + 1));
+    const suggested = inferDateRange(rawRows);
+
+    res.json({ rows: rawRows, referenceEntries, suggested, detectedScheduleType, additionalNotes, orgContext });
   } catch (err) {
     next(err);
   }

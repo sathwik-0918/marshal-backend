@@ -4,6 +4,7 @@ const router = express.Router();
 const { requireAuthentication, attachUserIfPresent } = require('../middleware/auth');
 const { loadSchedule, requireReadAccess, requireRole } = require('../middleware/scheduleAccess');
 const scheduleController = require('../controllers/scheduleController');
+const referenceEntryController = require('../controllers/referenceEntryController');
 const scheduleFromFileController = require('../controllers/scheduleFromFileController');
 const activityRoutes = require('./activityRoutes');
 
@@ -33,6 +34,7 @@ router.post('/from-file/confirm', requireAuthentication, scheduleFromFileControl
 router.use('/:scheduleId', loadSchedule);
 
 router.get('/:scheduleId', attachUserIfPresent, requireReadAccess, scheduleController.getSchedule);
+router.get('/:scheduleId/reference-entries', attachUserIfPresent, requireReadAccess, referenceEntryController.listReferenceEntries);
 router.post('/:scheduleId/report-problem', requireAuthentication, requireRole('stakeholder'), agentController.reportProblem);
 router.post('/:scheduleId/knowledge', requireAuthentication, requireRole('manager'), upload.single('file'), knowledgeController.uploadKnowledge);
 router.patch('/:scheduleId', requireAuthentication, requireRole('manager'), scheduleController.updateSchedule);

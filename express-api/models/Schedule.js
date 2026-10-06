@@ -49,6 +49,16 @@ const scheduleSchema = new mongoose.Schema(
     startDate: Date,
     endDate: Date,
     location: String,
+    sourceDocumentType: {
+      type: String,
+      default: undefined,
+    },
+    sourceContext: {
+      orgName: String,
+      department: String,
+      academicTerm: String,
+      location: String,
+    },
     status: {
       type: String,
       enum: ['draft', 'live', 'completed', 'archived'],
