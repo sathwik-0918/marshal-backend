@@ -1,7 +1,7 @@
 import fitz
+from typing import Optional
 
-
-def extract_text(pdf_bytes: bytes, filename: str = "document.pdf") -> str:
+def extract_text(pdf_bytes: bytes, filename: str = "document.pdf", page_num: Optional[int] = None) -> str:
     """
     PyMuPDF text-layer extraction only — covers typed/exported PDFs,
     which is the realistic case for organizer policies and venue docs.
@@ -13,7 +13,8 @@ def extract_text(pdf_bytes: bytes, filename: str = "document.pdf") -> str:
     text_parts = []
     try:
         pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
-        for page in pdf:
+        pages = [pdf[page_num]] if page_num is not None else pdf
+        for page in pages:
             text_parts.append(page.get_text("text"))
         pdf.close()
     except Exception as e:

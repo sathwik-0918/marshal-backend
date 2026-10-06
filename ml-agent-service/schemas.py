@@ -90,31 +90,35 @@ class AgentResponse(BaseModel):
 class ExtractedActivityRow(BaseModel):
     title: str
     activity_type: str = "session"
-    date: str = Field("", description="YYYY-MM-DD, resolved from a real calendar date stated in the document. Empty if none is ever stated - never guessed.")
-    time: str = Field("", description="HH:MM 24-hour, only if explicitly stated. Empty if not given - never guessed.")
+    date: str = Field("", description="YYYY-MM-DD if stated, else empty - never guess")
+    time: str = Field("", description="HH:MM if stated, else empty - never guess")
     duration_minutes: Optional[int] = None
     venue: str = ""
     description: str = ""
-    participant_references: list[str] = Field(default_factory=list, description="Names or emails of people/teams mentioned for this activity, exactly as written")
+    participant_references: list[str] = Field(default_factory=list, description="Names/emails mentioned, as written")
     required_resources: list[str] = Field(default_factory=list)
-    confidence: str = Field("high", description="'low' if any field had to be inferred rather than read directly")
+    confidence: str = Field("high", description="'low' if inferred, not stated directly")
 
 
 class ExtractedReferenceEntry(BaseModel):
     title: str
-    entry_type: str = Field(description="'recurring_weekly' or 'date_range'")
+    entry_type: str = Field(description="recurring_weekly or date_range")
     description: str = ""
-    weekday: Optional[str] = Field(None, description="'Monday' etc - only for recurring_weekly")
-    start_time: Optional[str] = Field(None, description="HH:MM - only for recurring_weekly")
+    weekday: Optional[str] = Field(None, description="recurring_weekly only")
+    start_time: Optional[str] = Field(None, description="HH:MM, recurring_weekly only")
     end_time: Optional[str] = None
-    start_date: Optional[str] = Field(None, description="YYYY-MM-DD - only for date_range")
+    start_date: Optional[str] = Field(None, description="YYYY-MM-DD, date_range only")
     end_date: Optional[str] = None
     venue: str = ""
-    metadata: list[str] = Field(default_factory=list, description="Short 'label: value' strings - faculty, section, cohort, subject code, etc.")
+    metadata: list[str] = Field(default_factory=list, description="'label: value' strings")
 
 
 class ScheduleExtraction(BaseModel):
-    detected_schedule_type: str = Field(description="A short label for what this document actually is, e.g. 'Sports event', 'College timetable', 'Hostel mess menu', 'Other' - inferred from content, not assumed")
+    detected_schedule_type: str = Field(description="What this document is, inferred from content")
     activities: list[ExtractedActivityRow] = Field(default_factory=list)
     reference_entries: list[ExtractedReferenceEntry] = Field(default_factory=list)
-    additional_notes: str = Field("", description="Rules/policies/instructions that are NOT a schedulable activity - never put this content into an activity row")
+    additional_notes: str = Field("", description="Rules/policies, not activities")
+    org_name: str = ""
+    department: str = ""
+    academic_term: str = ""
+    location: str = ""

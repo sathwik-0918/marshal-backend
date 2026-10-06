@@ -88,7 +88,7 @@ def run_agent(schedule_id: str, schedule_name: str, activities: list, raw_messag
         "activities": activities,
         "reference_entries": reference_entries or [],
         "raw_message": raw_message,
-        "understood": None,
+        "understood": {},
         "relevant_activities": [],
         "rewritten_query": None,
         "documents": [],

@@ -52,18 +52,17 @@ async def extract_schedule(file: UploadFile = File(...)):
     content = await file.read()
     filename = file.filename or "document"
 
-    if filename.lower().endswith(".pdf"):
-        text = pdf_utils.extract_text(content, filename)
-    else:
-        text = content.decode("utf-8", errors="ignore")
-
-    if not text.strip():
-        return {"success": False, "error": "No extractable text found in this file"}
-
     try:
-        result = schedule_extractor.extract(text)
+        if filename.lower().endswith(".pdf"):
+            result = schedule_extractor.extract_from_pdf(content, filename)
+        else:
+            text = content.decode("utf-8", errors="ignore")
+            if not text.strip():
+                return {"success": False, "error": "No extractable text found in this file"}
+            result = schedule_extractor.extract_from_text(text)
     except Exception as error:
         print(f"[schedule_extract] failed: {error}")
         return {"success": False, "error": "Couldn't read this document as a schedule. Try a clearer file, or enter activities manually."}
 
     return {"success": True, "extraction": result.model_dump()}
+
