@@ -1,8 +1,14 @@
 const Activity = require('../models/Activity');
-const ReferenceEntry = require('../models/ReferenceEntry');
 const Proposal = require('../models/Proposal');
 const AuditLog = require('../models/AuditLog');
 const Notification = require('../models/Notification');
+const ReferenceEntry = require('../models/ReferenceEntry');
+const Schedule = require('../models/Schedule');
+
+function sectionOf(ref) {
+  const line = (ref.metadata || []).find((m) => m.toLowerCase().startsWith('section:'));
+  return line ? line.split(':').slice(1).join(':').trim() : '';
+}
 
 async function reportProblem(req, res, next) {
   try {
@@ -11,6 +17,8 @@ async function reportProblem(req, res, next) {
 
     const activities = await Activity.find({ scheduleId: req.schedule._id }).sort({ scheduledStart: 1 });
     const referenceEntries = await ReferenceEntry.find({ scheduleId: req.schedule._id });
+    // select:false fields - fetched explicitly, only here, only when needed.
+    const extras = await Schedule.findById(req.schedule._id).select('+generationSpec +generationConstraints').lean();
 
     const agentRes = await fetch(`${process.env.ML_SERVICE_URL}/agent/process`, {
       method: 'POST',
@@ -44,6 +52,8 @@ async function reportProblem(req, res, next) {
           venue: r.venue || '',
           metadata: r.metadata || [],
         })),
+        timetable_spec: extras?.generationSpec || null,
+        timetable_constraints: extras?.generationConstraints || [],
       }),
     });
 
@@ -55,6 +65,7 @@ async function reportProblem(req, res, next) {
     }
 
     const activityMap = new Map(activities.map((a) => [a._id.toString(), a]));
+    const refMap = new Map(referenceEntries.map((r) => [r._id.toString(), r]));
     const affectedIds = understood.affected_activity_ids || [];
 
     const created = await Proposal.create({
@@ -68,6 +79,18 @@ async function reportProblem(req, res, next) {
         strategy: opt.strategy,
         risk: opt.risk,
         changes: opt.changes.map((c) => {
+          if (c.target === 'reference_entry') {
+            const ref = refMap.get(c.activity_id);
+            const section = ref ? sectionOf(ref) : '';
+            return {
+              activityId: c.activity_id,
+              targetModel: 'ReferenceEntry',
+              activityTitle: ref ? `${ref.title}${section ? ` (Section ${section})` : ''}` : 'Unknown entry',
+              field: c.field,
+              oldValue: ref ? ref[c.field] : undefined,
+              newValue: c.new_value,
+            };
+          }
           const act = activityMap.get(c.activity_id);
           const oldValue = act ? (c.field === 'scheduledStart' ? act.scheduledStart.toISOString() : act[c.field]) : undefined;
           return {
@@ -84,6 +107,7 @@ async function reportProblem(req, res, next) {
           conflictActivityIds: opt.checks?.conflict_activity_ids || [],
         },
       })),
+      timetableConstraints: proposal.timetable_constraints || undefined,
       status: 'pending',
     });
 

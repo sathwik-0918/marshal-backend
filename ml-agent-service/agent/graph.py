@@ -3,18 +3,23 @@ from agent.state import AgentState
 from agent import nodes
 
 
-def route_after_intent(state: AgentState) -> str:
-    if state["intent"] == "general_chat":
-        return "answer_general_chat"
-    if state["intent"] == "schedule_query":
-        return "answer_schedule_query"
-    if state["intent"] == "knowledge_query":
-        return "retrieve_for_knowledge"
-    return "understand_request"
-
-
 def _route_to_ml_or_plan(state: AgentState) -> str:
     return "get_ml_prediction" if state.get("relevant_activities") else "plan_changes"
+
+
+def route_after_intent(state: AgentState) -> str:
+    intent = state["intent"]
+    if intent == "general_chat":
+        return "answer_general_chat"
+    if intent == "schedule_query":
+        return "answer_schedule_query"
+    if intent == "knowledge_query":
+        return "retrieve_for_knowledge"
+    # A schedule created by the generator carries its requirement spec - revise
+    # it with the solver instead of looking for dated activities that don't exist.
+    if state.get("timetable_spec"):
+        return "adapt_timetable"
+    return "understand_request"
 
 
 def route_after_understand(state: AgentState) -> str:
@@ -36,7 +41,7 @@ def build_graph():
     builder.add_node("answer_schedule_query", nodes.answer_schedule_query)
     builder.add_node("retrieve_for_knowledge", nodes.retrieve)
     builder.add_node("answer_knowledge_query", nodes.answer_knowledge_query)
-
+    builder.add_node("adapt_timetable", nodes.adapt_timetable)
     builder.add_node("understand_request", nodes.understand_request)
     builder.add_node("retrieve", nodes.retrieve)
     builder.add_node("grade", nodes.grade)
@@ -51,14 +56,15 @@ def build_graph():
         "answer_general_chat": "answer_general_chat",
         "answer_schedule_query": "answer_schedule_query",
         "retrieve_for_knowledge": "retrieve_for_knowledge",
+        "adapt_timetable": "adapt_timetable",
         "understand_request": "understand_request",
     })
     builder.add_edge("answer_general_chat", END)
     builder.add_edge("answer_schedule_query", END)
     builder.add_edge("retrieve_for_knowledge", "answer_knowledge_query")
     builder.add_edge("answer_knowledge_query", END)
+    builder.add_edge("adapt_timetable", END)
 
-    # Everything below this line is completely unchanged from before this turn.
     builder.add_conditional_edges("understand_request", route_after_understand, {
         "retrieve": "retrieve",
         "get_ml_prediction": "get_ml_prediction",
@@ -81,13 +87,16 @@ def build_graph():
 _graph = build_graph()
 
 
-def run_agent(schedule_id: str, schedule_name: str, activities: list, raw_message: str, reference_entries: list = None, emit_progress=None) -> dict:
+def run_agent(schedule_id: str, schedule_name: str, activities: list, raw_message: str,
+              reference_entries: list = None, emit_progress=None,
+              timetable_spec: dict = None, timetable_constraints: list = None) -> dict:
     result = _graph.invoke({
         "schedule_id": schedule_id,
         "schedule_name": schedule_name,
         "activities": activities,
         "reference_entries": reference_entries or [],
         "raw_message": raw_message,
+        "intent": "",
         "understood": {},
         "relevant_activities": [],
         "rewritten_query": None,
@@ -98,7 +107,8 @@ def run_agent(schedule_id: str, schedule_name: str, activities: list, raw_messag
         "ml_predictions": {},
         "proposal": None,
         "validated": False,
-        "intent": "",
+        "timetable_spec": timetable_spec,
+        "timetable_constraints": timetable_constraints or [],
         "emit_progress": emit_progress,
     })
     return {"understood": result["understood"], "proposal": result["proposal"]}

@@ -59,6 +59,15 @@ const scheduleSchema = new mongoose.Schema(
       academicTerm: String,
       location: String,
     },
+    generationSpec: {
+      type: mongoose.Schema.Types.Mixed,
+      select: false,
+    },
+    generationConstraints: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: [],
+      select: false,
+    },
     status: {
       type: String,
       enum: ['draft', 'live', 'completed', 'archived'],

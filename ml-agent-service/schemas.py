@@ -41,6 +41,8 @@ class AgentRequest(BaseModel):
     message: str
     activities: list[ActivityContext]
     reference_entries: list[ReferenceEntryContext] = Field(default_factory=list)
+    timetable_spec: Optional[dict] = None
+    timetable_constraints: list = Field(default_factory=list)
 
 
 class IntentRoute(BaseModel):
@@ -122,3 +124,42 @@ class ScheduleExtraction(BaseModel):
     department: str = ""
     academic_term: str = ""
     location: str = ""
+    
+class SessionRequirement(BaseModel):
+    subject_name: str
+    session_kind: str = Field(description="'class', 'lab', or 'special'")
+    duration_minutes: int
+    weekly_count: int
+    faculty: list[str] = Field(default_factory=list)
+    max_same_day_minutes: Optional[int] = Field(None, description="Cap on same-subject minutes per day, if explicitly stated")
+    section: str = Field("", description="Section/group this belongs to - for future multi-section generation")
+    venue: str = Field("", description="Room or lab this session needs, if explicitly stated (e.g. 'Lab 13,14') - empty if not stated")
+
+
+class DayStructure(BaseModel):
+    period_start_times: list[str] = Field(description="HH:MM start of each period, in order")
+    period_length_minutes: int
+    lunch_after_period_index: Optional[int] = Field(None, description="0-indexed - lunch falls after this period index")
+
+
+class GenerationSpec(BaseModel):
+    title: str
+    working_days: list[str] = Field(description="e.g. ['Monday', 'Tuesday', ..., 'Saturday']")
+    day_structure: DayStructure
+    sessions: list[SessionRequirement]
+    
+class FeedbackConstraint(BaseModel):
+    constraint_type: str = Field(description="separate_days | avoid_day | require_day | time_preference | faculty_unavailable | unsupported")
+    subjects: list[str] = Field(default_factory=list)
+    faculty: list[str] = Field(default_factory=list)
+    section: Optional[str] = Field(None, description="Limit to one section, if the feedback named one")
+    day: Optional[str] = None
+    part_of_day: Optional[str] = Field(None, description="morning or afternoon - for faculty_unavailable")
+    time_preference: Optional[str] = None
+    is_hard: bool = True
+    one_off: bool = Field(False, description="True if about one specific date (today, tomorrow, this Friday, a calendar date), not a standing change")
+
+class FeedbackExtraction(BaseModel):
+    constraints: list[FeedbackConstraint] = Field(default_factory=list)
+    unrecognized: str = Field("", description="Feedback that didn't map to a supported constraint type - never silently dropped")
+    

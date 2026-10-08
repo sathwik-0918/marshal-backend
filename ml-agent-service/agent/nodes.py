@@ -10,6 +10,8 @@ from schemas import IntentExtraction, IntentRoute, QuerySpec, RuleNotes
 from ml import predictor
 from knowledge import store_manager
 from agent import query_engine
+from generation import feedback_extractor, timetable_solver, timetable_diff
+from schemas import GenerationSpec, FeedbackConstraint
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
@@ -457,3 +459,103 @@ def annotate_rules(state: AgentState) -> dict:
             checks["notes"] = list(checks.get("notes", [])) + [f"Rule check ({label}): {n.note}"]
             options[n.option_index - 1]["checks"] = checks
     return {"proposal": {**proposal, "options": options, "sources": sources}}
+
+def _describe_constraint(fc) -> str:
+    when = " ".join(x for x in (fc.day, fc.part_of_day) if x)
+    if fc.constraint_type == "faculty_unavailable":
+        return f"{', '.join(fc.faculty) or 'A teacher'} unavailable{(' ' + when) if when else ''}"
+    if fc.constraint_type == "avoid_day":
+        return f"{', '.join(fc.subjects)} not on {fc.day}"
+    if fc.constraint_type == "require_day":
+        return f"{', '.join(fc.subjects)} only on {fc.day}"
+    if fc.constraint_type == "separate_days":
+        return f"{' and '.join(fc.subjects)} on different days"
+    if fc.constraint_type == "time_preference":
+        return f"{', '.join(fc.subjects)} in the {fc.time_preference}"
+    return "your change"
+
+
+def adapt_timetable(state: AgentState) -> dict:
+    """
+    Revises a GENERATED weekly timetable. Same minimal-perturbation solver as
+    refine-with-feedback: the request becomes constraints, every session that
+    doesn't have to move keeps its slot, and the difference becomes an ordinary
+    proposal that goes through the same human approval as any other change.
+    """
+    _emit(state, "adapt_timetable", "active", "Re-solving the timetable with your change")
+    try:
+        spec = GenerationSpec.model_validate(state["timetable_spec"])
+    except Exception as error:
+        print(f"[adapt_timetable] saved spec unreadable: {error}")
+        return _clarify("This timetable's saved requirements couldn't be read, so I can't safely revise it.")
+
+    entries = [e for e in (state.get("reference_entries") or [])
+               if e.get("entryType") == "recurring_weekly" and e.get("weekday") and e.get("startTime") and e.get("endTime")]
+    if not entries:
+        return _clarify("This schedule has no weekly timetable entries to revise.")
+
+    solver_entries = [{"title": e["title"], "weekday": e["weekday"], "start_time": e["startTime"], "end_time": e["endTime"],
+                       "venue": e.get("venue") or "", "metadata": e.get("metadata") or []} for e in entries]
+
+    subjects = sorted({s.subject_name for s in spec.sessions})
+    faculty = sorted({f for s in spec.sessions for f in s.faculty})
+    sections = sorted({s.section for s in spec.sessions if s.section})
+    try:
+        fb = feedback_extractor.extract_feedback(state["raw_message"], subjects, faculty, sections)
+    except Exception as error:
+        print(f"[adapt_timetable] feedback extraction failed: {error}")
+        return _clarify("I had trouble reading that request. Try rephrasing it, for example \"Mrs. Anitha can't teach on Tuesdays\".")
+
+    if any(c.one_off for c in fb.constraints):
+        return _clarify(
+            "This timetable is a weekly template, so a change here applies every week - not just one date. "
+            "If that's what you want, say it as a standing change (for example \"Mrs. Anitha can't teach on "
+            "Tuesdays\"). One-day substitutions aren't supported on generated timetables yet."
+        )
+    new_constraints = [c for c in fb.constraints if c.constraint_type != "unsupported"]
+    if not new_constraints:
+        return _clarify("I couldn't turn that into a change I can apply. Try something like \"Mrs. Anitha can't teach "
+                        "on Tuesdays\" or \"don't put DAA and CN on the same day for Section B\".")
+
+    try:
+        prior = [FeedbackConstraint.model_validate(c) for c in (state.get("timetable_constraints") or [])]
+    except Exception:
+        prior = []
+    all_constraints = prior + new_constraints
+
+    result = timetable_solver.refine_with_feedback(spec, solver_entries, all_constraints, "balanced")
+    if not result["feasible"]:
+        return _clarify(result["message"])
+
+    moves = timetable_diff.diff_entries(entries, result["reference_entries"])
+    if not moves:
+        return _clarify("Nothing needs to move - the timetable already satisfies that.")
+
+    changes = []
+    for mv in moves:
+        for field, old_v, new_v in (("weekday", mv["old"]["weekday"], mv["new"]["weekday"]),
+                                    ("startTime", mv["old"]["start"], mv["new"]["start"]),
+                                    ("endTime", mv["old"]["end"], mv["new"]["end"])):
+            if old_v != new_v:
+                changes.append({"activity_id": mv["entry_id"], "field": field, "new_value": new_v, "target": "reference_entry"})
+
+    moved_subjects = sorted({mv["title"] for mv in moves})
+    risk = "low" if len(moves) <= 2 else "medium"
+    what = "; ".join(_describe_constraint(c) for c in new_constraints)
+    names = ", ".join(moved_subjects[:4]) + ("..." if len(moved_subjects) > 4 else "")
+    notes = [f"{len(moves)} session{'s' if len(moves) != 1 else ''} move; every other session keeps its current slot",
+             "Updates the weekly timetable - applies every week, not one date"]
+    notes += list(result.get("unresolved_feedback") or [])
+
+    option = {
+        "strategy": "timetable_revision",
+        "description": f"{what}: {len(moves)} session{'s' if len(moves) != 1 else ''} move ({names})",
+        "risk": risk, "changes": changes,
+        "checks": {"warnings": [], "notes": notes, "conflict_activity_ids": []},
+    }
+    _emit(state, "adapt_timetable", "done", "Revision ready")
+    return {"proposal": {
+        "needs_clarification": False, "clarification_question": None, "risk_tier": risk, "options": [option],
+        "timetable_constraints": [c.model_dump() for c in all_constraints if c.constraint_type != "unsupported"],
+        "validated": True,
+    }}

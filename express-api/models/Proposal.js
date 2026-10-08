@@ -8,15 +8,14 @@ const optionSchema = new mongoose.Schema(
     changes: [
       {
         activityId: { type: mongoose.Schema.Types.ObjectId, ref: 'Activity' },
+        // Which collection activityId points into - older proposals have none, which means Activity.
+        targetModel: { type: String, enum: ['Activity', 'ReferenceEntry'], default: undefined },
         activityTitle: String,
         field: String,
         oldValue: mongoose.Schema.Types.Mixed,
         newValue: mongoose.Schema.Types.Mixed,
       },
     ],
-    // Every field the validator produces MUST be declared here. Mongoose strict
-    // mode silently deletes anything that isn't, which is how earlier conflict
-    // warnings vanished.
     checks: {
       warnings: [String],
       notes: [String],
@@ -34,6 +33,9 @@ const proposalSchema = new mongoose.Schema(
     requestText: { type: String, required: true },
     riskTier: { type: String, enum: ['low', 'medium', 'high'], required: true },
     options: [optionSchema],
+    // The full set of standing constraints this revision leaves the timetable
+    // under - saved to the schedule only if the proposal is approved.
+    timetableConstraints: { type: [mongoose.Schema.Types.Mixed], default: undefined },
     status: {
       type: String,
       enum: ['pending', 'approved', 'rejected', 'auto_approved', 'escalated', 'expired'],

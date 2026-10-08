@@ -15,3 +15,4 @@ faiss-cpu>=1.8
 PyMuPDF>=1.24
 python-multipart>=0.0.9
 langchain-groq>=0.3
+ortools>=9.10

@@ -6,6 +6,7 @@ const { loadSchedule, requireReadAccess, requireRole } = require('../middleware/
 const scheduleController = require('../controllers/scheduleController');
 const referenceEntryController = require('../controllers/referenceEntryController');
 const scheduleFromFileController = require('../controllers/scheduleFromFileController');
+const generateController = require('../controllers/generateController');
 const activityRoutes = require('./activityRoutes');
 
 const agentController = require('../controllers/agentController');
@@ -30,6 +31,13 @@ router.post('/', requireAuthentication, scheduleController.createSchedule);
 router.post('/from-file/preview', requireAuthentication, upload.single('file'), scheduleFromFileController.previewFromFile);
 router.post('/from-file/preview-document', requireAuthentication, upload.single('file'), scheduleFromFileController.previewFromDocument);
 router.post('/from-file/confirm', requireAuthentication, scheduleFromFileController.confirmFromFile);
+// Generation routes - MUST stay above router.use('/:scheduleId', loadSchedule),
+// same as /discover, /mine and /from-file/*. Below that line, "generate" is
+// read as a schedule ID and Mongoose throws the CastError you're seeing.
+router.post('/generate/preview', requireAuthentication, generateController.previewGeneration);
+router.post('/generate/confirm', requireAuthentication, generateController.confirmGeneration);
+router.post('/generate/refine', requireAuthentication, generateController.refineGeneration);
+router.post('/generate/explain', requireAuthentication, generateController.explainGeneration);
 
 router.use('/:scheduleId', loadSchedule);
 
